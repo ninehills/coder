@@ -11,6 +11,7 @@
 # - build/coder_linux_${arch}.(apk|deb|rpm): build a release Linux package
 # - build/coder_${version}_linux_${arch}.tag: build a release Linux Docker image
 # - build/coder_helm.tgz: build a release Helm chart
+export CODER_BUILD_AGPL=1
 
 .DEFAULT_GOAL := build-fat
 
