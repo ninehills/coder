@@ -105,6 +105,7 @@ type Options struct {
 	AgentStatsRefreshInterval   time.Duration
 	Experimental                bool
 	DeploymentConfig            *codersdk.DeploymentConfig
+	NoAGPL                      bool
 }
 
 // New constructs a Coder API handler.
@@ -180,6 +181,8 @@ func New(options *Options) *API {
 		},
 		metricsCache: metricsCache,
 		Auditor:      atomic.Pointer[audit.Auditor]{},
+		// Add a compatibility layer for the enterprise API
+		compatibility: NewCompatibility(options),
 	}
 	api.Auditor.Store(&options.Auditor)
 	api.workspaceAgentCache = wsconncache.New(api.dialWorkspaceAgentTailnet, 0)
@@ -574,6 +577,11 @@ func New(options *Options) *API {
 				r.Get("/", api.workspaceApplicationAuth)
 			})
 		})
+		// add compatibility routes for the enterprise API
+		if !options.NoAGPL {
+			r.With(apiKeyMiddleware).Get("/entitlements", api.serveEntitlementsWithEmpty)
+			r.With(apiKeyMiddleware).Get("/workspace-quota/{user}", api.workspaceQuotaWithEmpty)
+		}
 	})
 
 	r.NotFound(compressHandler(http.HandlerFunc(api.siteHandler.ServeHTTP)).ServeHTTP)
@@ -605,6 +613,9 @@ type API struct {
 	WebsocketWaitGroup sync.WaitGroup
 
 	workspaceAgentCache *wsconncache.Cache
+
+	// Add a compatibility layer for the enterprise API
+	compatibility *Compatibility
 }
 
 // Close waits for all WebSocket connections to drain before returning.
