@@ -32,6 +32,8 @@ jobs:
     env:
       # Necessary for Docker manifest
       DOCKER_CLI_EXPERIMENTAL: "enabled"
+      CODER_IMAGE_BASE: "ghcr.io/ninehills/coder"
+      CODER_BUILD_AGPL: "1"
     steps:
       - uses: actions/checkout@v3
         with:
@@ -113,7 +115,7 @@ jobs:
             build/coder_"$version"_windows_amd64_installer.exe \
             build/coder_helm_"$version".tgz
         env:
-          CODER_SIGN_DARWIN: "1"
+          CODER_SIGN_DARWIN: "0"
           AC_CERTIFICATE_FILE: /tmp/apple_cert.p12
           AC_CERTIFICATE_PASSWORD_FILE: /tmp/apple_cert_password.txt
           AC_APIKEY_ISSUER_ID: ${{ secrets.AC_APIKEY_ISSUER_ID }}
@@ -171,14 +173,17 @@ jobs:
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v0
+        if: ${{ github.repository_owner == 'coder' }}
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: Setup GCloud SDK
         uses: 'google-github-actions/setup-gcloud@v0'
+        if: ${{ github.repository_owner == 'coder' }}
 
       - name: Publish Helm Chart
+        if: ${{ github.repository_owner == 'coder' }}
         run: |
           set -euo pipefail
           version="$(./scripts/version.sh)"
@@ -190,7 +195,7 @@ jobs:
           gsutil -h "Cache-Control:no-cache,max-age=0" cp build/helm/index.yaml gs://helm.coder.com/v2
 
       - name: Upload artifacts to actions (if dry-run or snapshot)
-        if: ${{ github.event.inputs.dry_run || github.event.inputs.snapshot }}
+        if: ${{ github.repository_owner == 'coder' && (github.event.inputs.dry_run || github.event.inputs.snapshot) }}
         uses: actions/upload-artifact@v2
         with:
           name: release-artifacts
