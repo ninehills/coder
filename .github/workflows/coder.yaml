@@ -417,7 +417,7 @@ jobs:
     timeout-minutes: 30
     needs: changes
     if: |
-      github.ref == 'refs/heads/main' && !github.event.pull_request.head.repo.fork
+      github.repository_owner == 'coder' && github.ref == 'refs/heads/main' && !github.event.pull_request.head.repo.fork
       && needs.changes.outputs.docs-only == 'false'
     permissions:
       contents: read
@@ -552,7 +552,7 @@ jobs:
     name: "test/e2e/${{ matrix.os }}"
     needs:
       - changes
-    if: needs.changes.outputs.docs-only == 'false'
+    if: github.repository_owner == 'coder' && needs.changes.outputs.docs-only == 'false'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
