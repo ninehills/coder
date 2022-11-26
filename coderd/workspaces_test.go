@@ -125,13 +125,16 @@ func TestWorkspace(t *testing.T) {
 
 		const templateIcon = "/img/icon.svg"
 		const templateDisplayName = "This is template"
+		var templateAllowUserCancelWorkspaceJobs = false
 		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID, func(ctr *codersdk.CreateTemplateRequest) {
 			ctr.Icon = templateIcon
 			ctr.DisplayName = templateDisplayName
+			ctr.AllowUserCancelWorkspaceJobs = &templateAllowUserCancelWorkspaceJobs
 		})
 		require.NotEmpty(t, template.Name)
 		require.NotEmpty(t, template.DisplayName)
 		require.NotEmpty(t, template.Icon)
+		require.False(t, template.AllowUserCancelWorkspaceJobs)
 		workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID)
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
@@ -144,6 +147,7 @@ func TestWorkspace(t *testing.T) {
 		assert.Equal(t, template.Name, ws.TemplateName)
 		assert.Equal(t, templateIcon, ws.TemplateIcon)
 		assert.Equal(t, templateDisplayName, ws.TemplateDisplayName)
+		assert.Equal(t, templateAllowUserCancelWorkspaceJobs, ws.TemplateAllowUserCancelWorkspaceJobs)
 	})
 }
 
@@ -1353,6 +1357,7 @@ func TestWorkspaceWatcher(t *testing.T) {
 							Auth: &proto.Agent_Token{
 								Token: authToken,
 							},
+							ConnectionTimeoutSeconds: 1,
 						}},
 					}},
 				},
@@ -1368,58 +1373,64 @@ func TestWorkspaceWatcher(t *testing.T) {
 
 	wc, err := client.WatchWorkspace(ctx, workspace.ID)
 	require.NoError(t, err)
-	wait := func() {
+
+	// Wait events are easier to debug with timestamped logs.
+	logger := slogtest.Make(t, nil).Named(t.Name()).Leveled(slog.LevelDebug)
+	wait := func(event string) {
 		select {
 		case <-ctx.Done():
-			t.Fail()
+			require.FailNow(t, "timed out waiting for event", event)
 		case <-wc:
+			logger.Info(ctx, "done waiting for event", slog.F("event", event))
 		}
 	}
 
 	coderdtest.CreateWorkspaceBuild(t, client, workspace, database.WorkspaceTransitionStart)
-	// the workspace build being created
-	wait()
-	// the workspace build being acquired
-	wait()
-	// the workspace build completing
-	wait()
+	wait("workspace build being created")
+	wait("workspace build being acquired")
+	wait("workspace build completing")
+
+	// Unfortunately, this will add ~1s to the test due to the granularity
+	// of agent timeout seconds. However, if we don't do this we won't know
+	// which trigger we received when waiting for connection.
+	//
+	// Note that the first timeout is from `coderdtest.CreateWorkspace` and
+	// the latter is from `coderdtest.CreateWorkspaceBuild`.
+	wait("agent timeout after create")
+	wait("agent timeout after start")
 
 	agentClient := codersdk.New(client.URL)
 	agentClient.SetSessionToken(authToken)
 	agentCloser := agent.New(agent.Options{
 		Client: agentClient,
-		Logger: slogtest.Make(t, nil).Named("agent").Leveled(slog.LevelDebug),
+		Logger: logger.Named("agent"),
 	})
 	defer func() {
 		_ = agentCloser.Close()
 	}()
 
-	// the agent connected
-	wait()
+	wait("agent connected")
 	agentCloser.Close()
-	// the agent disconnected
-	wait()
+	wait("agent disconnected")
 
 	closeFunc.Close()
 	build := coderdtest.CreateWorkspaceBuild(t, client, workspace, database.WorkspaceTransitionStart)
-	// First is for the workspace build itself
-	wait()
+	wait("first is for the workspace build itself")
 	err = client.CancelWorkspaceBuild(ctx, build.ID)
 	require.NoError(t, err)
-	// Second is for the build cancel
-	wait()
+	wait("second is for the build cancel")
 
 	err = client.UpdateWorkspace(ctx, workspace.ID, codersdk.UpdateWorkspaceRequest{
 		Name: "another",
 	})
 	require.NoError(t, err)
-	wait()
+	wait("update workspace name")
 
 	err = client.UpdateActiveTemplateVersion(ctx, template.ID, codersdk.UpdateActiveTemplateVersion{
 		ID: template.ActiveVersionID,
 	})
 	require.NoError(t, err)
-	wait()
+	wait("update active template version")
 
 	cancel()
 }
