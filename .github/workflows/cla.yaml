@@ -7,10 +7,11 @@ on:
 
 jobs:
   CLAssistant:
+    if: github.repository_owner == 'coder'
     runs-on: ubuntu-latest
     steps:
       - name: "CLA Assistant"
-        if: github.repository_owner == 'coder' && (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
         uses: contributor-assistant/github-action@v2.2.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
