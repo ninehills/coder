@@ -47,6 +47,7 @@ import (
 	"github.com/coder/coder/coderd/rbac"
 	"github.com/coder/coder/coderd/telemetry"
 	"github.com/coder/coder/coderd/tracing"
+	"github.com/coder/coder/coderd/updatecheck"
 	"github.com/coder/coder/coderd/wsconncache"
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/provisionerd/proto"
@@ -106,6 +107,7 @@ type Options struct {
 	Experimental                bool
 	DeploymentConfig            *codersdk.DeploymentConfig
 	NoAGPL                      bool
+	UpdateCheckOptions          *updatecheck.Options // Set non-nil to enable update checking.
 }
 
 // New constructs a Coder API handler.
@@ -124,19 +126,13 @@ func New(options *Options) *API {
 		options.AgentInactiveDisconnectTimeout = options.AgentConnectionUpdateFrequency * 2
 	}
 	if options.AgentStatsRefreshInterval == 0 {
-		options.AgentStatsRefreshInterval = 10 * time.Minute
+		options.AgentStatsRefreshInterval = 5 * time.Minute
 	}
 	if options.MetricsCacheRefreshInterval == 0 {
 		options.MetricsCacheRefreshInterval = time.Hour
 	}
 	if options.APIRateLimit == 0 {
 		options.APIRateLimit = 512
-	}
-	if options.AgentStatsRefreshInterval == 0 {
-		options.AgentStatsRefreshInterval = 5 * time.Minute
-	}
-	if options.MetricsCacheRefreshInterval == 0 {
-		options.MetricsCacheRefreshInterval = time.Hour
 	}
 	if options.Authorizer == nil {
 		options.Authorizer = rbac.NewAuthorizer()
@@ -184,6 +180,13 @@ func New(options *Options) *API {
 		// Add a compatibility layer for the enterprise API
 		compatibility: NewCompatibility(options),
 	}
+	if options.UpdateCheckOptions != nil {
+		api.updateChecker = updatecheck.New(
+			options.Database,
+			options.Logger.Named("update_checker"),
+			*options.UpdateCheckOptions,
+		)
+	}
 	api.Auditor.Store(&options.Auditor)
 	api.workspaceAgentCache = wsconncache.New(api.dialWorkspaceAgentTailnet, 0)
 	api.TailnetCoordinator.Store(&options.TailnetCoordinator)
@@ -207,8 +210,10 @@ func New(options *Options) *API {
 	})
 
 	r.Use(
-		httpmw.AttachRequestID,
 		httpmw.Recover(api.Logger),
+		tracing.StatusWriterMiddleware,
+		tracing.Middleware(api.TracerProvider),
+		httpmw.AttachRequestID,
 		httpmw.ExtractRealIP(api.RealIPConfig),
 		httpmw.Logger(api.Logger),
 		httpmw.Prometheus(options.PrometheusRegistry),
@@ -242,7 +247,6 @@ func New(options *Options) *API {
 
 	apps := func(r chi.Router) {
 		r.Use(
-			tracing.Middleware(api.TracerProvider),
 			httpmw.RateLimit(options.APIRateLimit, time.Minute),
 			httpmw.ExtractAPIKey(httpmw.ExtractAPIKeyConfig{
 				DB:            options.Database,
@@ -290,7 +294,6 @@ func New(options *Options) *API {
 
 		r.NotFound(func(rw http.ResponseWriter, r *http.Request) { httpapi.RouteNotFound(rw) })
 		r.Use(
-			tracing.Middleware(api.TracerProvider),
 			// Specific routes can specify smaller limits.
 			httpmw.RateLimit(options.APIRateLimit, time.Minute),
 		)
@@ -310,6 +313,9 @@ func New(options *Options) *API {
 					Version:     buildinfo.Version(),
 				})
 			})
+		})
+		r.Route("/updatecheck", func(r chi.Router) {
+			r.Get("/", api.updateCheck)
 		})
 		r.Route("/config", func(r chi.Router) {
 			r.Use(apiKeyMiddleware)
@@ -511,14 +517,6 @@ func New(options *Options) *API {
 				r.Get("/listening-ports", api.workspaceAgentListeningPorts)
 				r.Get("/connection", api.workspaceAgentConnection)
 				r.Get("/coordinate", api.workspaceAgentClientCoordinate)
-				// TODO: This can be removed in October. It allows for a friendly
-				// error message when transitioning from WebRTC to Tailscale. See:
-				// https://github.com/coder/coder/issues/4126
-				r.Get("/dial", func(w http.ResponseWriter, r *http.Request) {
-					httpapi.Write(r.Context(), w, http.StatusGone, codersdk.Response{
-						Message: "Your Coder CLI is out of date, and requires v0.8.15+ to connect!",
-					})
-				})
 			})
 		})
 		r.Route("/workspaces", func(r chi.Router) {
@@ -606,16 +604,18 @@ type API struct {
 	// RootHandler serves "/"
 	RootHandler chi.Router
 
-	metricsCache *metricscache.Cache
-	siteHandler  http.Handler
+	siteHandler http.Handler
 
 	WebsocketWaitMutex sync.Mutex
 	WebsocketWaitGroup sync.WaitGroup
 
+	metricsCache        *metricscache.Cache
 	workspaceAgentCache *wsconncache.Cache
 
 	// Add a compatibility layer for the enterprise API
 	compatibility *Compatibility
+
+	updateChecker       *updatecheck.Checker
 }
 
 // Close waits for all WebSocket connections to drain before returning.
@@ -625,6 +625,9 @@ func (api *API) Close() error {
 	api.WebsocketWaitMutex.Unlock()
 
 	api.metricsCache.Close()
+	if api.updateChecker != nil {
+		api.updateChecker.Close()
+	}
 	coordinator := api.TailnetCoordinator.Load()
 	if coordinator != nil {
 		_ = (*coordinator).Close()
@@ -652,10 +655,10 @@ func compressHandler(h http.Handler) http.Handler {
 	return cmp.Handler(h)
 }
 
-// CreateInMemoryProvisionerDaemon is an in-memory connection to a provisionerd.  Useful when starting coderd and provisionerd
-// in the same process.
+// CreateInMemoryProvisionerDaemon is an in-memory connection to a provisionerd.
+// Useful when starting coderd and provisionerd in the same process.
 func (api *API) CreateInMemoryProvisionerDaemon(ctx context.Context, debounce time.Duration) (client proto.DRPCProvisionerDaemonClient, err error) {
-	clientSession, serverSession := provisionersdk.TransportPipe()
+	clientSession, serverSession := provisionersdk.MemTransportPipe()
 	defer func() {
 		if err != nil {
 			_ = clientSession.Close()
@@ -692,6 +695,7 @@ func (api *API) CreateInMemoryProvisionerDaemon(ctx context.Context, debounce ti
 		Telemetry:          api.Telemetry,
 		Tags:               tags,
 		QuotaCommitter:     &api.QuotaCommitter,
+		Auditor:            &api.Auditor,
 		AcquireJobDebounce: debounce,
 		Logger:             api.Logger.Named(fmt.Sprintf("provisionerd-%s", daemon.Name)),
 	})
@@ -716,5 +720,5 @@ func (api *API) CreateInMemoryProvisionerDaemon(ctx context.Context, debounce ti
 		_ = serverSession.Close()
 	}()
 
-	return proto.NewDRPCProvisionerDaemonClient(provisionersdk.Conn(clientSession)), nil
+	return proto.NewDRPCProvisionerDaemonClient(clientSession), nil
 }
