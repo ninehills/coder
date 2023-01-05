@@ -60,7 +60,14 @@ func Handler(siteFS fs.FS, binFS http.FileSystem) http.Handler {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/bin/", http.StripPrefix("/bin", http.FileServer(binFS)))
+	mux.Handle("/bin/", http.StripPrefix("/bin", http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		// Convert underscores in the filename to hyphens. We eventually want to
+		// change our hyphen-based filenames to underscores, but we need to
+		// support both for now.
+		r.URL.Path = strings.ReplaceAll(r.URL.Path, "_", "-")
+
+		http.FileServer(binFS).ServeHTTP(rw, r)
+	})))
 	mux.Handle("/", http.FileServer(http.FS(siteFS))) // All other non-html static files.
 
 	return secureHeaders(&handler{
@@ -266,9 +273,12 @@ func cspHeaders(next http.Handler) http.Handler {
 			CSPDirectiveDefaultSrc: {"'self'"},
 			CSPDirectiveConnectSrc: {"'self'"},
 			CSPDirectiveChildSrc:   {"'self'"},
-			CSPDirectiveScriptSrc:  {"'self'"},
-			CSPDirectiveFontSrc:    {"'self'"},
-			CSPDirectiveStyleSrc:   {"'self' 'unsafe-inline'"},
+			// https://cdn.jsdelivr.net is used by monaco editor on FE for Syntax Highlight
+			// https://github.com/suren-atoyan/monaco-react/issues/168
+			CSPDirectiveScriptSrc: {"'self' https://cdn.jsdelivr.net"},
+			CSPDirectiveStyleSrc:  {"'self' 'unsafe-inline' https://cdn.jsdelivr.net"},
+			// data: is used by monaco editor on FE for Syntax Highlight
+			CSPDirectiveFontSrc: {"'self' data:"},
 			// object-src is needed to support code-server
 			CSPDirectiveObjectSrc: {"'self'"},
 			// blob: for loading the pwa manifest for code-server
@@ -607,6 +617,9 @@ func extractBin(dest string, r io.Reader) (numExtracted int, err error) {
 				return n, nil
 			}
 			return n, xerrors.Errorf("read tar archive failed: %w", err)
+		}
+		if h.Name == "." || strings.Contains(h.Name, "..") {
+			continue
 		}
 
 		name := filepath.Join(dest, filepath.Base(h.Name))

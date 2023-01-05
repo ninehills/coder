@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"text/template"
 	"time"
@@ -76,7 +77,6 @@ func Core() []*cobra.Command {
 		dotfiles(),
 		gitssh(),
 		list(),
-		loadtest(),
 		login(),
 		logout(),
 		parameters(),
@@ -84,6 +84,7 @@ func Core() []*cobra.Command {
 		publickey(),
 		rename(),
 		resetPassword(),
+		scaletest(),
 		schedules(),
 		show(),
 		speedtest(),
@@ -97,6 +98,7 @@ func Core() []*cobra.Command {
 		users(),
 		versionCmd(),
 		workspaceAgent(),
+		vscodeipcCmd(),
 	}
 }
 
@@ -135,53 +137,6 @@ func Root(subcommands []*cobra.Command) *cobra.Command {
 				return gitAskpass().RunE(cmd, args)
 			}
 			return cmd.Help()
-		},
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			if cliflag.IsSetBool(cmd, varNoVersionCheck) &&
-				cliflag.IsSetBool(cmd, varNoFeatureWarning) {
-				return
-			}
-
-			// login handles checking the versions itself since it has a handle
-			// to an unauthenticated client.
-			//
-			// server is skipped for obvious reasons.
-			//
-			// agent is skipped because these checks use the global coder config
-			// and not the agent URL and token from the environment.
-			//
-			// gitssh is skipped because it's usually not called by users
-			// directly.
-			if cmd.Name() == "login" || cmd.Name() == "server" || cmd.Name() == "agent" || cmd.Name() == "gitssh" {
-				return
-			}
-			if isGitAskpass {
-				return
-			}
-
-			client, err := CreateClient(cmd)
-			// If we are unable to create a client, presumably the subcommand will fail as well
-			// so we can bail out here.
-			if err != nil {
-				return
-			}
-
-			err = checkVersions(cmd, client)
-			if err != nil {
-				// Just log the error here. We never want to fail a command
-				// due to a pre-run.
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-					cliui.Styles.Warn.Render("check versions error: %s"), err)
-				_, _ = fmt.Fprintln(cmd.ErrOrStderr())
-			}
-
-			err = checkWarnings(cmd, client)
-			if err != nil {
-				// Same as above
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-					cliui.Styles.Warn.Render("check entitlement warnings error: %s"), err)
-				_, _ = fmt.Fprintln(cmd.ErrOrStderr())
-			}
 		},
 		Example: formatExamples(
 			example{
@@ -307,6 +262,37 @@ func CreateClient(cmd *cobra.Command) (*codersdk.Client, error) {
 		return nil, err
 	}
 	client.SetSessionToken(token)
+
+	// We send these requests in parallel to minimize latency.
+	var (
+		versionErr = make(chan error)
+		warningErr = make(chan error)
+	)
+	go func() {
+		versionErr <- checkVersions(cmd, client)
+		close(versionErr)
+	}()
+
+	go func() {
+		warningErr <- checkWarnings(cmd, client)
+		close(warningErr)
+	}()
+
+	if err = <-versionErr; err != nil {
+		// Just log the error here. We never want to fail a command
+		// due to a pre-run.
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			cliui.Styles.Warn.Render("check versions error: %s"), err)
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr())
+	}
+
+	if err = <-warningErr; err != nil {
+		// Same as above
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			cliui.Styles.Warn.Render("check entitlement warnings error: %s"), err)
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr())
+	}
+
 	return client, nil
 }
 
@@ -599,12 +585,17 @@ func checkVersions(cmd *cobra.Command, client *codersdk.Client) error {
 	}
 
 	fmtWarningText := `version mismatch: client %s, server %s
-download the server version with: 'curl -L https://coder.com/install.sh | sh -s -- --version %s'
 `
+	// Our installation script doesn't work on Windows, so instead we direct the user
+	// to the GitHub release page to download the latest installer.
+	if runtime.GOOS == "windows" {
+		fmtWarningText += `download the server version from: https://github.com/coder/coder/releases/v%s`
+	} else {
+		fmtWarningText += `download the server version with: 'curl -L https://coder.com/install.sh | sh -s -- --version %s'`
+	}
 
 	if !buildinfo.VersionsMatch(clientVersion, info.Version) {
 		warn := cliui.Styles.Warn.Copy().Align(lipgloss.Left)
-		// Trim the leading 'v', our install.sh script does not handle this case well.
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), warn.Render(fmtWarningText), clientVersion, info.Version, strings.TrimPrefix(info.CanonicalVersion(), "v"))
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr())
 	}

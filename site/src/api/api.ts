@@ -231,6 +231,65 @@ export const getTemplateVersionByName = async (
   return response.data
 }
 
+export type GetPreviousTemplateVersionByNameResponse =
+  | TypesGen.TemplateVersion
+  | undefined
+
+export const getPreviousTemplateVersionByName = async (
+  organizationId: string,
+  versionName: string,
+): Promise<GetPreviousTemplateVersionByNameResponse> => {
+  try {
+    const response = await axios.get<TypesGen.TemplateVersion>(
+      `/api/v2/organizations/${organizationId}/templateversions/${versionName}/previous`,
+    )
+    return response.data
+  } catch (error) {
+    // When there is no previous version, like the first version of a template,
+    // the API returns 404 so in this case we can safely return undefined
+    if (
+      axios.isAxiosError(error) &&
+      error.response &&
+      error.response.status === 404
+    ) {
+      return undefined
+    }
+
+    throw error
+  }
+}
+
+export const createTemplateVersion = async (
+  organizationId: string,
+  data: TypesGen.CreateTemplateVersionRequest,
+): Promise<TypesGen.TemplateVersion> => {
+  const response = await axios.post<TypesGen.TemplateVersion>(
+    `/api/v2/organizations/${organizationId}/templateversions`,
+    data,
+  )
+  return response.data
+}
+
+export const getTemplateVersionParameters = async (
+  versionId: string,
+): Promise<TypesGen.Parameter[]> => {
+  const response = await axios.get(
+    `/api/v2/templateversions/${versionId}/parameters`,
+  )
+  return response.data
+}
+
+export const createTemplate = async (
+  organizationId: string,
+  data: TypesGen.CreateTemplateRequest,
+): Promise<TypesGen.Template> => {
+  const response = await axios.post(
+    `/api/v2/organizations/${organizationId}/templates`,
+    data,
+  )
+  return response.data
+}
+
 export const updateTemplateMeta = async (
   templateId: string,
   data: TypesGen.UpdateTemplateMeta,
@@ -661,5 +720,46 @@ export const getFile = async (fileId: string): Promise<ArrayBuffer> => {
   const response = await axios.get<ArrayBuffer>(`/api/v2/files/${fileId}`, {
     responseType: "arraybuffer",
   })
+  return response.data
+}
+
+export const getServiceBanner = async (): Promise<TypesGen.ServiceBanner> => {
+  const response = await axios.get(`/api/v2/service-banner`)
+  return response.data
+}
+
+export const setServiceBanner = async (
+  b: TypesGen.ServiceBanner,
+): Promise<TypesGen.ServiceBanner> => {
+  const response = await axios.put(`/api/v2/service-banner`, b)
+  return response.data
+}
+
+export const getTemplateExamples = async (
+  organizationId: string,
+): Promise<TypesGen.TemplateExample[]> => {
+  const response = await axios.get(
+    `/api/v2/organizations/${organizationId}/templates/examples`,
+  )
+  return response.data
+}
+
+export const uploadTemplateFile = async (
+  file: File,
+): Promise<TypesGen.UploadResponse> => {
+  const response = await axios.post("/api/v2/files", file, {
+    headers: {
+      "Content-Type": "application/x-tar",
+    },
+  })
+  return response.data
+}
+
+export const getTemplateVersionLogs = async (
+  versionId: string,
+): Promise<TypesGen.ProvisionerJobLog[]> => {
+  const response = await axios.get<TypesGen.ProvisionerJobLog[]>(
+    `/api/v2/templateversions/${versionId}/logs`,
+  )
   return response.data
 }
