@@ -35,8 +35,9 @@ fi
 
 version=""
 dry_run=0
+ignore_notes=0
 
-args="$(getopt -o "" -l version:,dry-run -- "$@")"
+args="$(getopt -o "" -l version:,dry-run,ignore-notes -- "$@")"
 eval set -- "$args"
 while true; do
 	case "$1" in
@@ -46,6 +47,10 @@ while true; do
 		;;
 	--dry-run)
 		dry_run=1
+		shift
+		;;
+	--ignore-notes)
+		ignore_notes=1
 		shift
 		;;
 	--)
@@ -106,11 +111,15 @@ if [[ "$dry_run" == 1 ]]; then
 	new_ref="$(git rev-parse --short HEAD)"
 fi
 
-# shellcheck source=scripts/release/check_commit_metadata.sh
-source "$SCRIPT_DIR/release/check_commit_metadata.sh" "$old_tag" "$new_ref"
+if [[ "$ignore_notes" == 0 ]]; then
+	# shellcheck source=scripts/release/check_commit_metadata.sh
+	source "$SCRIPT_DIR/release/check_commit_metadata.sh" "$old_tag" "$new_ref"
 
-# Craft the release notes.
-release_notes="$(execrelative ./release/generate_release_notes.sh --old-version "$old_tag" --new-version "$new_tag" --ref "$new_ref")"
+	# Craft the release notes.
+	release_notes="$(execrelative ./release/generate_release_notes.sh --old-version "$old_tag" --new-version "$new_tag" --ref "$new_ref")"
+else
+	release_notes="Publish release $new_tag"
+fi
 
 release_notes_file="$(mktemp)"
 echo "$release_notes" >"$release_notes_file"

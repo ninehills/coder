@@ -159,7 +159,7 @@ jobs:
 
       - name: Publish release
         run: |
-          ./scripts/release/publish.sh \
+          ./scripts/release/publish.sh --ignore-notes \
             ${{ (github.event.inputs.dry_run || github.event.inputs.snapshot) && '--dry-run' }} \
             ./build/*_installer.exe \
             ./build/*.zip \
